@@ -6,8 +6,8 @@ const path = require('path');
 const os = require('os');
 const { mirrorDirectory } = require('./mirror-dir.cjs');
 
-const INSTALLED_PATH = path.join(os.homedir(), '.claude', 'plugins', 'marketplaces', 'thedotmack');
-const CACHE_BASE_PATH = path.join(os.homedir(), '.claude', 'plugins', 'cache', 'thedotmack', 'claude-mem');
+const INSTALLED_PATH = path.join(os.homedir(), '.claude', 'plugins', 'marketplaces', 'yves8833');
+const CACHE_BASE_PATH = path.join(os.homedir(), '.claude', 'plugins', 'cache', 'yves8833', 'claude-mem');
 
 const BASE_EXCLUDES = [
   '.git',

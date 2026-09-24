@@ -7,9 +7,17 @@ the Claude observer rotates across several subscription auths
 
 ## Install
 
-The marketplace must keep the name `thedotmack`: install and cache paths are
-hard-coded to it (`src/shared/paths.ts`, `src/shared/worker-utils.ts`,
-`src/npx-cli/`). Only its source points at this fork.
+This fork installs as the `yves8833` marketplace (`claude-mem@yves8833`), so it is never
+mistaken for the official plugin. Upstream hard-codes `thedotmack` in install/cache paths,
+plugin keys and hook launchers; the fork renames all of them, and
+`tests/fork-marketplace-identity.test.ts` fails if a merge brings a new one in. On that
+failure, rename the new literal (links to the upstream repo stay as they are), then
+`node scripts/build-hooks.js --write-shell-templates` if a hook launcher changed.
+
+```bash
+claude plugin marketplace add yves8833/claude-mem
+claude plugin install claude-mem@yves8833
+```
 
 ## Versioning
 
@@ -36,7 +44,7 @@ git merge upstream/main
 npm version <fork-version> --no-git-tag-version
 npm run build
 # bump the three hand-maintained manifests to <fork-version>
-bun test tests/worker/claude-auth-pool.test.ts && npm run typecheck
+bun test tests/worker/claude-auth-pool.test.ts tests/fork-marketplace-identity.test.ts && npm run typecheck
 git add -A ':!*.map' && git commit -m "chore: fork release <fork-version>"
 git push origin main
 ```

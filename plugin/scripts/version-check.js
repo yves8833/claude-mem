@@ -119,7 +119,7 @@ function findMissingDependencies(pluginRoot) {
     // looks tree-scoped but is not: `paths` seeds Node's lookup, which then
     // walks every ancestor directory and always consults the global folders
     // ($HOME/.node_modules, $PREFIX/lib/node). Plugin roots live at
-    // ~/.claude/plugins/cache/thedotmack/claude-mem/<version>/, so a copy of a
+    // ~/.claude/plugins/cache/yves8833/claude-mem/<version>/, so a copy of a
     // dependency anywhere above them - or installed globally - would satisfy
     // the probe and let this guard report a gutted tree as complete, silently
     // reintroducing the very bug it exists to catch (gh #3872 review).
