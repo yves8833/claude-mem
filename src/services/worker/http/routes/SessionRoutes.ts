@@ -59,13 +59,14 @@ const MAX_USER_PROMPT_BYTES = 256 * 1024;
  */
 function normalizeAbortReason(
   reason: string | null | undefined
-): 'idle' | 'shutdown' | 'overflow' | 'restart_guard' | 'quota' | 'provider_switch' | 'none' {
+): 'idle' | 'shutdown' | 'overflow' | 'restart_guard' | 'quota' | 'auth_rotate' | 'provider_switch' | 'none' {
   switch ((reason ?? '').split(':')[0]) {
     case 'idle': return 'idle';
     case 'shutdown': return 'shutdown';
     case 'overflow': return 'overflow';
     case 'restart-guard': return 'restart_guard';
     case 'quota': return 'quota';
+    case 'auth_rotate': return 'auth_rotate';
     case 'provider_switch': return 'provider_switch';
     default: return 'none';
   }
@@ -545,6 +546,22 @@ export class SessionRoutes extends BaseRouteHandler {
             void this.ensureGeneratorRunning(session.sessionDbId, 'overflow-recycle')
               .catch(error => {
                 logger.error('SESSION', 'Failed to resume the observer after recycling its conversation', {
+                  sessionId: session.sessionDbId,
+                }, error instanceof Error ? error : new Error(String(error)));
+              });
+          }, 0);
+          resume.unref?.();
+        }
+
+        // An auth rotation left the pool with headroom: resume at once on the
+        // next auth (ClaudeProvider picks it) instead of waiting for an ingest.
+        // Each rotation benches or over-thresholds the auth it left, so the
+        // chain ends in a pause once the pool runs out.
+        if (normalizeAbortReason(reason) === 'auth_rotate') {
+          const resume = setTimeout(() => {
+            void this.ensureGeneratorRunning(session.sessionDbId, 'auth-rotate')
+              .catch(error => {
+                logger.error('SESSION', 'Failed to resume the observer on the next Claude auth', {
                   sessionId: session.sessionDbId,
                 }, error instanceof Error ? error : new Error(String(error)));
               });

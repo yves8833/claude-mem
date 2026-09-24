@@ -18,11 +18,12 @@ import {
 } from '../../supervisor/process-registry.js';
 import { sanitizeEnv } from '../../supervisor/env-sanitizer.js';
 import {
-  globalRateLimitStore,
   buildUsageLimitHitProps,
   extractRateLimitInfo,
   shouldAbortForQuota,
 } from './RateLimitStore.js';
+import { claudeAuthPool } from './ClaudeAuthPool.js';
+import { loadClaudeConfigDirs } from '../../shared/oauth-token.js';
 
 // @ts-ignore - Agent SDK types may not be available
 import { query } from '@anthropic-ai/claude-agent-sdk';
@@ -236,6 +237,19 @@ export class ClaudeProvider {
       throw err;
     }
 
+    // Run on the auth with the most headroom; a spent pool pauses here without
+    // sending anything, and the quota breaker takes it from there.
+    const configDirs = loadClaudeConfigDirs();
+    const authChoice = claudeAuthPool.decide(configDirs, getAuthMethodDescription);
+    if (authChoice.kind === 'pause') {
+      logger.warn('SDK', `Claude auth pool is spent, not starting the observer: ${authChoice.reason}`, {
+        sessionDbId: session.sessionDbId,
+      });
+      session.abortReason = 'quota:pool';
+      return;
+    }
+    const configDir = authChoice.configDir;
+
     const modelId = session.modelOverride || this.getModelId();
     session.lastModelId = typeof modelId === 'string' ? modelId : undefined;
     // Each query() starts a fresh SDK process, so its total_cost_usd
@@ -244,7 +258,7 @@ export class ClaudeProvider {
 
     const activeResponseContext = { current: snapshotResponseContext(session) };
     const compressField: FieldCompressor = (text, budgetChars, signal) =>
-      this.compressField(text, budgetChars, session, modelId, claudePath, signal);
+      this.compressField(text, budgetChars, session, modelId, claudePath, configDir, signal);
     // Paces the streaming feed to one unanswered prompt per generation (#4066).
     const pacer = new ObserverResponsePacer();
     const messageGenerator = this.createMessageGenerator(session, cwdTracker, activeResponseContext, worker, compressField, pacer);
@@ -279,8 +293,8 @@ export class ClaudeProvider {
     );
 
     try {
-      const isolatedEnv = sanitizeEnv(await buildIsolatedEnvWithFreshOAuth());
-      const authMethod = getAuthMethodDescription();
+      const isolatedEnv = sanitizeEnv(await buildIsolatedEnvWithFreshOAuth(true, configDir));
+      const authMethod = getAuthMethodDescription(configDir);
 
       logger.info('SDK', 'Starting SDK query', {
         sessionDbId: session.sessionDbId,
@@ -344,17 +358,18 @@ export class ClaudeProvider {
         );
         // Quota-aware wall-clock guard (#2234): the SDK pushes
         // `rate_limit_event` messages carrying live subscription quota state
-        // (see extractRateLimitInfo for the shape). Capture the snapshot, then
-        // bail out of the loop before issuing another request if we've
-        // crossed a per-window threshold. API-key users are exempt — they
-        // authorized per-call spend.
+        // (see extractRateLimitInfo for the shape). Capture the snapshot for
+        // this auth, then bail out of the loop before issuing another request
+        // when this auth crossed a per-window threshold (rotate to another
+        // auth) or the whole pool is spent (pause). API-key users are exempt —
+        // they authorized per-call spend.
         const info = extractRateLimitInfo(message);
         if (info) {
-          // The observer runs on the same account as the observed session,
-          // so a `rejected` snapshot here means the user's own Claude Code
-          // session is out of usage too. set() dedupes: one event per
-          // exhausted window, not one per observer request against the wall.
-          if (globalRateLimitStore.set(info)) {
+          const store = claudeAuthPool.store(configDir);
+          // A `rejected` snapshot means this account is out of usage, for the
+          // user's own Claude Code sessions on it too. set() dedupes: one
+          // event per exhausted window, not one per request against the wall.
+          if (store.set(info)) {
             logger.warn('SDK', 'Subscription usage limit hit', {
               sessionDbId: session.sessionDbId,
               window: info.rateLimitType,
@@ -368,14 +383,19 @@ export class ClaudeProvider {
               observed_billing: session.observedBilling,
             });
           }
-          const decision = shouldAbortForQuota(authMethod, globalRateLimitStore);
-          if (decision.abort) {
-            logger.warn('SDK', `Aborting session for quota guard: ${decision.reason}`, {
+          const decision = shouldAbortForQuota(authMethod, store);
+          const pool = claudeAuthPool.decide(configDirs, getAuthMethodDescription);
+          const quotaAbortReason = pool.kind === 'pause'
+            ? 'quota:pool'
+            : decision.abort ? `auth_rotate:${decision.window ?? 'unknown'}` : null;
+          if (quotaAbortReason) {
+            logger.warn('SDK', `Aborting session for quota guard: ${pool.kind === 'pause' ? `pool ${pool.reason}` : decision.reason}`, {
               sessionDbId: session.sessionDbId,
               window: decision.window,
               authMethod,
+              ...(pool.kind === 'use' ? { nextAuth: getAuthMethodDescription(pool.configDir) } : {}),
             });
-            session.abortReason = `quota:${decision.window ?? 'unknown'}`;
+            session.abortReason = quotaAbortReason;
             try {
               session.abortController.abort();
             } catch {
@@ -598,7 +618,28 @@ export class ClaudeProvider {
           pacer.answer();
         }
       }
+    } catch (error) {
+      // A quota refusal or 429 that surfaced as an error names no window, so
+      // bench this auth and rotate while the pool still has one to offer. A
+      // single auth keeps the plain error path.
+      const kind = classifyClaudeError(error).kind;
+      if (configDirs.length < 2 || (kind !== 'quota_exhausted' && kind !== 'rate_limit')) throw error;
+      claudeAuthPool.bench(configDir);
+      if (claudeAuthPool.decide(configDirs, getAuthMethodDescription).kind === 'pause') throw error;
+      logger.warn('SDK', `Claude auth refused the observer (${kind}); rotating to another auth`, {
+        sessionDbId: session.sessionDbId,
+        authMethod: getAuthMethodDescription(configDir),
+      });
+      session.abortReason = `auth_rotate:${kind}`;
     } finally {
+      // Quota prose (ResponseProcessor) is a refusal on this auth too: bench it
+      // and rotate instead of pausing while the pool still has room.
+      if (configDirs.length > 1 && session.abortReason === 'quota:observer_text') {
+        claudeAuthPool.bench(configDir);
+        if (claudeAuthPool.decide(configDirs, getAuthMethodDescription).kind === 'use') {
+          session.abortReason = 'auth_rotate:observer_text';
+        }
+      }
       // Whatever ended the stream (throw, quota break, abort), nothing will
       // answer the feed's last prompt any more.
       pacer.close();
@@ -636,8 +677,9 @@ export class ClaudeProvider {
     },
     modelId: string,
     claudePath: string,
+    configDir: string,
   ): Promise<string | null> {
-    const isolatedEnv = sanitizeEnv(await buildIsolatedEnvWithFreshOAuth());
+    const isolatedEnv = sanitizeEnv(await buildIsolatedEnvWithFreshOAuth(true, configDir));
     const controller = new AbortController();
     const abort = () => controller.abort();
     const signals = context.signals ?? [];
@@ -685,6 +727,7 @@ export class ClaudeProvider {
     session: ActiveSession,
     modelId: string,
     claudePath: string,
+    configDir: string,
     signal: AbortSignal,
   ): Promise<string | null> {
     return this.runStandaloneObserverPrompt(
@@ -697,6 +740,7 @@ export class ClaudeProvider {
       },
       modelId,
       claudePath,
+      configDir,
     );
   }
 
@@ -707,11 +751,14 @@ export class ClaudeProvider {
   ): Promise<string> {
     const claudePath = findClaudeExecutable('SDK');
     const modelId = activeModelId ?? this.getSummaryModelId();
+    const configDirs = loadClaudeConfigDirs();
+    const authChoice = claudeAuthPool.decide(configDirs, getAuthMethodDescription);
     const text = await this.runStandaloneObserverPrompt(
       buildTelegramWrapupPrompt(input.summaryText),
       input,
       modelId,
       claudePath,
+      authChoice.kind === 'use' ? authChoice.configDir : configDirs[0],
     );
     if (!text?.trim()) {
       const error = new Error('Claude returned no text for the Telegram wrap-up');

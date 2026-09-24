@@ -97,9 +97,6 @@ export class RateLimitStore {
   }
 }
 
-/** Process-wide singleton. */
-export const globalRateLimitStore = new RateLimitStore();
-
 /**
  * Pull the `rate_limit_info` payload out of an SDK stream message, or
  * undefined when the message is not a quota snapshot.
@@ -153,6 +150,21 @@ export function minutesUntilReset(resetsAt: number | undefined, now: number = Da
 function normalizeResetTimeMs(resetsAt: number | undefined): number | undefined {
   if (typeof resetsAt !== 'number' || !Number.isFinite(resetsAt)) return undefined;
   return resetsAt < 1e12 ? resetsAt * 1000 : resetsAt;
+}
+
+/**
+ * The account's seven_day utilization from its live snapshot: 1 when the
+ * provider rejected the window, undefined when no snapshot (or an expired one)
+ * says. The SDK reports one window per event, so a quiet window may never
+ * have been seen.
+ */
+export function sevenDayUtilization(store: RateLimitStore, now: number = Date.now()): number | undefined {
+  const entry = store.get('seven_day');
+  if (!entry) return undefined;
+  const resetsAtMs = normalizeResetTimeMs(entry.resetsAt);
+  if (resetsAtMs !== undefined && resetsAtMs <= now) return undefined;
+  if (entry.status === 'rejected') return 1;
+  return typeof entry.utilization === 'number' ? entry.utilization : undefined;
 }
 
 /**

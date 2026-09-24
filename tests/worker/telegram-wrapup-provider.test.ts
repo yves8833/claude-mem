@@ -86,7 +86,7 @@ describe('Telegram wrap-up provider reuse', () => {
     const field = new AbortController();
     const session = { ...input, abortController: new AbortController() };
     (source === 'field' ? field : session.abortController).abort();
-    await expect((provider as any).compressField('large field', 100, session, 'model', '/mock/claude', field.signal))
+    await expect((provider as any).compressField('large field', 100, session, 'model', '/mock/claude', '/mock/.claude', field.signal))
       .resolves.toBeNull();
     expect(sdkQuery).not.toHaveBeenCalled();
   });

@@ -80,6 +80,26 @@ export function resolveEffectiveClaudeConfigDir(settingValue?: string): string {
 }
 
 /**
+ * The setting may list several config dirs, comma-separated: the Claude
+ * observer rotates across them (see ClaudeAuthPool). Each entry resolves like
+ * a single value; an empty setting yields the one default dir. Callers that do
+ * not rotate use the first entry.
+ */
+export function resolveClaudeConfigDirs(settingValue?: string): string[] {
+  const dirs = (settingValue ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => resolveEffectiveClaudeConfigDir(entry));
+  return dirs.length > 0 ? [...new Set(dirs)] : [resolveEffectiveClaudeConfigDir()];
+}
+
+/** The config dirs currently configured in settings.json, in rotation order. */
+export function loadClaudeConfigDirs(): string[] {
+  return resolveClaudeConfigDirs(SettingsDefaultsManager.loadFromFile(paths.settings()).CLAUDE_MEM_CLAUDE_CONFIG_DIR);
+}
+
+/**
  * Strip one or more trailing `/` or `\` characters. Never reduces a bare
  * separator-only string (e.g. "/") to "" — not a real config dir in
  * practice, but a defensive no-op is cheaper than returning an empty path.
@@ -443,14 +463,15 @@ function readSidecarExpiresAt(): number | undefined {
  */
 export async function readClaudeOAuthToken(
   execImpl: typeof execFileAsync = execFileAsync,
+  /** The config dir whose credentials to read; defaults to the first configured one. */
+  configDir?: string,
 ): Promise<OAuthTokenResult> {
   let keychainResult: OAuthTokenResult;
 
   // #2753 — resolve the effective config dir (setting > env > default) once
   // per call; only the macOS branch currently has a verified per-config-dir
   // service-name suffix, so it's the only branch that consumes it.
-  const settings = SettingsDefaultsManager.loadFromFile(paths.settings());
-  const effectiveConfigDir = resolveEffectiveClaudeConfigDir(settings.CLAUDE_MEM_CLAUDE_CONFIG_DIR);
+  const effectiveConfigDir = configDir ?? loadClaudeConfigDirs()[0];
 
   switch (process.platform) {
     case 'darwin':

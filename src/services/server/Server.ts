@@ -19,7 +19,7 @@ import { ENV_PREFIXES, ENV_EXACT_MATCHES } from '../../supervisor/env-sanitizer.
 import { flushResponseThen } from './flushResponseThen.js';
 import { getUptimeSeconds } from '../../shared/uptime.js';
 import { snapshotDependencyHealth, type DependencyHealthSnapshot } from '../../shared/dependency-health.js';
-import { globalRateLimitStore } from '../worker/RateLimitStore.js';
+import { claudeAuthPool } from '../worker/ClaudeAuthPool.js';
 import type { ObservationQueueHealth } from '../../server/queue/queue-health-types.js';
 
 const INSTRUCTIONS_BASE_DIR: string = path.resolve(__dirname, '../skills/mem-search');
@@ -263,7 +263,7 @@ export class Server {
         mcpReady: this.options.getMcpReady(),
         ai: this.options.getAiStatus(),
         dependencies: dependencyHealth,
-        rateLimits: globalRateLimitStore.getMostRecentByWindow(),
+        rateLimits: claudeAuthPool.snapshot(),
         ...(queueHealth ? { queue: queueHealth } : {}),
       });
     });

@@ -194,7 +194,7 @@ export class SettingsDefaultsManager {
     CLAUDE_MEM_LOG_LEVEL: 'INFO',
     CLAUDE_MEM_PYTHON_VERSION: '3.13',
     CLAUDE_CODE_PATH: '', // Empty means auto-detect via 'which claude'
-    CLAUDE_MEM_CLAUDE_CONFIG_DIR: '', // #2753 — override CLAUDE_CONFIG_DIR for the keychain lookup + SDK subprocess only; empty = fall through to process.env.CLAUDE_CONFIG_DIR/default
+    CLAUDE_MEM_CLAUDE_CONFIG_DIR: '', // #2753 — override CLAUDE_CONFIG_DIR for the keychain lookup + SDK subprocess only; comma-separate several to rotate the observer across them (ClaudeAuthPool); empty = fall through to process.env.CLAUDE_CONFIG_DIR/default
     CLAUDE_MEM_MODE: 'code', // Default mode profile
     CLAUDE_MEM_CONTEXT_SHOW_READ_TOKENS: 'false',
     CLAUDE_MEM_CONTEXT_SHOW_WORK_TOKENS: 'false',

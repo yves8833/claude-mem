@@ -4,20 +4,17 @@ import { parseEnv } from 'util';
 import { basename } from 'path';
 import { logger } from '../utils/logger.js';
 import { paths, DEFAULT_CLAUDE_CONFIG_DIR } from './paths.js';
-import { SettingsDefaultsManager } from './SettingsDefaultsManager.js';
 import {
   readClaudeOAuthToken,
   writeStaleMarker,
   clearStaleMarker,
-  resolveEffectiveClaudeConfigDir,
+  loadClaudeConfigDirs,
   type OAuthTokenResult,
 } from './oauth-token.js';
 
-/** #2753 — the effective config dir's profile label for logging (never the token itself): 'default' for ~/.claude, else its basename. */
-function resolveConfigDirProfileLabel(): string {
-  const settings = SettingsDefaultsManager.loadFromFile(paths.settings());
-  const effectiveConfigDir = resolveEffectiveClaudeConfigDir(settings.CLAUDE_MEM_CLAUDE_CONFIG_DIR);
-  return effectiveConfigDir === DEFAULT_CLAUDE_CONFIG_DIR ? 'default' : basename(effectiveConfigDir);
+/** #2753 — a config dir's profile label for logging (never the token itself): 'default' for ~/.claude, else its basename. */
+export function claudeConfigDirProfileLabel(configDir: string = loadClaudeConfigDirs()[0]): string {
+  return configDir === DEFAULT_CLAUDE_CONFIG_DIR ? 'default' : basename(configDir);
 }
 
 // Resolved lazily so tests (and any rare runtime path-overrides) can target a
@@ -180,7 +177,11 @@ export function saveClaudeMemEnv(env: ClaudeMemEnv): void {
   }
 }
 
-export function buildIsolatedEnv(includeCredentials: boolean = true): Record<string, string> {
+export function buildIsolatedEnv(
+  includeCredentials: boolean = true,
+  /** The config dir the SDK subprocess runs as; defaults to the first configured one. */
+  configDir?: string,
+): Record<string, string> {
   const isolatedEnv: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (value !== undefined && !BLOCKED_ENV_VARS.includes(key)) {
@@ -194,13 +195,12 @@ export function buildIsolatedEnv(includeCredentials: boolean = true): Record<str
 
   // #2753 — override whatever the blanket copy above put in
   // CLAUDE_CONFIG_DIR (the WORKER's own env) with the effective config dir
-  // for the SDK SUBPROCESS only: the CLAUDE_MEM_CLAUDE_CONFIG_DIR setting
-  // when set, else process.env.CLAUDE_CONFIG_DIR/default (unchanged from
-  // today). This never touches the worker's own paths.CLAUDE_CONFIG_DIR /
+  // for the SDK SUBPROCESS only: the caller's chosen dir (the observer's auth
+  // pool), else the first CLAUDE_MEM_CLAUDE_CONFIG_DIR entry, else
+  // process.env.CLAUDE_CONFIG_DIR/default. This never touches the worker's own paths.CLAUDE_CONFIG_DIR /
   // MARKETPLACE_ROOT, which stay derived solely from
   // process.env.CLAUDE_CONFIG_DIR at module load.
-  const configDirSettings = SettingsDefaultsManager.loadFromFile(paths.settings());
-  isolatedEnv.CLAUDE_CONFIG_DIR = resolveEffectiveClaudeConfigDir(configDirSettings.CLAUDE_MEM_CLAUDE_CONFIG_DIR);
+  isolatedEnv.CLAUDE_CONFIG_DIR = configDir ?? loadClaudeConfigDirs()[0];
 
   if (includeCredentials) {
     const credentials = loadClaudeMemEnv();
@@ -237,8 +237,10 @@ export function buildIsolatedEnv(includeCredentials: boolean = true): Record<str
  */
 export async function buildIsolatedEnvWithFreshOAuth(
   includeCredentials: boolean = true,
+  /** The config dir whose OAuth identity to inject; defaults to the first configured one. */
+  configDir?: string,
 ): Promise<Record<string, string>> {
-  const isolatedEnv = buildIsolatedEnv(includeCredentials);
+  const isolatedEnv = buildIsolatedEnv(includeCredentials, configDir);
 
   // Defensive: ensure no parent-process OAuth token survives this path even
   // if BLOCKED_ENV_VARS is bypassed. Issue #2215.
@@ -272,7 +274,7 @@ export async function buildIsolatedEnvWithFreshOAuth(
 
   let result: OAuthTokenResult;
   try {
-    result = await readClaudeOAuthToken();
+    result = await readClaudeOAuthToken(undefined, isolatedEnv.CLAUDE_CONFIG_DIR);
   } catch (error) {
     logger.warn(
       'OAUTH',
@@ -329,7 +331,7 @@ export function hasAnthropicAuthToken(): boolean {
   return !!env.ANTHROPIC_AUTH_TOKEN;
 }
 
-export function getAuthMethodDescription(): string {
+export function getAuthMethodDescription(configDir?: string): string {
   if (hasAnthropicApiKey()) {
     return 'API key (from ~/.claude-mem/.env)';
   }
@@ -342,7 +344,7 @@ export function getAuthMethodDescription(): string {
   // #2753: names the resolved profile (suffix/dir basename or 'default'),
   // never the token itself — the profile is the whole point (which
   // config-dir identity's keychain entry this worker will inject).
-  const profile = resolveConfigDirProfileLabel();
+  const profile = claudeConfigDirProfileLabel(configDir);
   if (process.env.CLAUDE_CODE_OAUTH_TOKEN) {
     return `Claude Code OAuth token (env, refreshed via keychain at spawn) profile=${profile}`;
   }
