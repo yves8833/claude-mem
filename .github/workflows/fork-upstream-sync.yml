@@ -1,0 +1,156 @@
+# Fork only: watch thedotmack/claude-mem for a new release, merge it, build the
+# next fork release and open a PR. Nothing reaches main — and so nothing reaches
+# the installed plugin, which auto-updates from main — until that PR is merged.
+# A merge conflict outside generated files, or a failing check, opens an issue.
+name: Upstream sync
+
+on:
+  schedule:
+    - cron: '23 1 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and verify the latest upstream release without pushing, opening a PR or filing an issue
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: upstream-sync
+
+jobs:
+  sync:
+    if: github.repository == 'yves8833/claude-mem'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DRY_RUN: ${{ inputs.dry_run == true }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Find the latest upstream release
+        id: upstream
+        run: |
+          git remote add upstream https://github.com/thedotmack/claude-mem.git
+          git fetch --quiet --tags --force upstream
+          tag=$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          branch="upstream-sync/$tag"
+          { echo "tag=$tag"; echo "branch=$branch"; } >> "$GITHUB_OUTPUT"
+          todo=true
+          if [ "$DRY_RUN" != true ]; then
+            if git merge-base --is-ancestor "$tag" HEAD; then
+              echo "main already contains $tag"; todo=false
+            elif [ -n "$(gh pr list --head "$branch" --state all --json number --jq '.[].number')" ]; then
+              echo "a PR for $tag already exists"; todo=false
+            elif [ -n "$(gh issue list --state open --search "\"Upstream sync needs attention: $tag\" in:title" --json number --jq '.[].number')" ]; then
+              echo "an open issue already tracks $tag"; todo=false
+            fi
+          fi
+          echo "todo=$todo" >> "$GITHUB_OUTPUT"
+
+      - if: steps.upstream.outputs.todo == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - if: steps.upstream.outputs.todo == 'true'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Merge the release
+        if: steps.upstream.outputs.todo == 'true'
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
+          BRANCH: ${{ steps.upstream.outputs.branch }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git log --oneline --no-merges "HEAD..$TAG" > "$RUNNER_TEMP/upstream-commits.txt"
+          git switch -c "$BRANCH"
+          if ! git merge --no-ff --no-commit "$TAG"; then
+            conflicted=$(git diff --name-only --diff-filter=U)
+            # Build output and version fields: take upstream's side, fork-release.sh rebuilds them.
+            manual=$(grep -vE '^(plugin/|package\.json$|CHANGELOG\.md$|\.claude-plugin/|\.codex-plugin/|\.grok-plugin/|openclaw/openclaw\.plugin\.json$|claude-mem-cursor/|claude-mem-grok-bot/)' <<<"$conflicted" || true)
+            if [ -n "$manual" ]; then
+              { echo "Merge conflicts outside generated files:"; echo; echo "$manual"; } | tee "$RUNNER_TEMP/failure.txt" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+            git checkout --theirs -- $conflicted
+            git add -- $conflicted
+          fi
+          git commit --no-edit --allow-empty -m "Merge upstream $TAG"
+
+      - name: Build the fork release
+        id: release
+        if: steps.upstream.outputs.todo == 'true'
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          bun install
+          version=$(scripts/fork-release.sh "$TAG")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Fork release $version built from upstream $TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify
+        if: steps.upstream.outputs.todo == 'true'
+        run: |
+          npm run typecheck
+          bun test \
+            tests/fork-marketplace-identity.test.ts \
+            tests/worker/claude-auth-pool.test.ts \
+            tests/worker/rate-limit-store.test.ts \
+            tests/worker/quota-cooldown.test.ts \
+            tests/worker/generator-exit-preserves-work.test.ts \
+            tests/worker/overflow-recycle-resume.test.ts \
+            tests/worker/reactive-quota-abort-reason.test.ts \
+            tests/worker/claude-provider-assistant-frames.test.ts \
+            tests/worker/claude-provider-response-pacing.test.ts \
+            tests/worker/telegram-wrapup-provider.test.ts \
+            tests/shared/oauth-token.test.ts \
+            tests/env-isolation.test.ts
+
+      - name: Open the PR
+        if: steps.upstream.outputs.todo == 'true' && env.DRY_RUN != 'true'
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
+          BRANCH: ${{ steps.upstream.outputs.branch }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          git add -A
+          git commit -m "chore: fork release $VERSION"
+          git push --force -u origin "$BRANCH"
+          {
+            echo "Merges upstream **$TAG** and builds fork release **$VERSION**."
+            echo
+            echo "Merging this PR updates every machine that installed \`claude-mem@yves8833\` on its next plugin auto-update."
+            echo
+            echo "### Upstream commits"
+            echo '```'
+            head -100 "$RUNNER_TEMP/upstream-commits.txt"
+            echo '```'
+          } > "$RUNNER_TEMP/pr-body.md"
+          gh pr create --base main --head "$BRANCH" --title "Upstream $TAG → fork $VERSION" --body-file "$RUNNER_TEMP/pr-body.md"
+
+      - name: Report the failure
+        if: failure() && env.DRY_RUN != 'true'
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            echo "The scheduled sync could not turn upstream **$TAG** into a fork release."
+            echo
+            [ -f "$RUNNER_TEMP/failure.txt" ] && cat "$RUNNER_TEMP/failure.txt" && echo
+            echo "Run: $RUN_URL"
+            echo
+            echo "Finish it by hand as described in FORK.md, then close this issue."
+          } > "$RUNNER_TEMP/issue-body.md"
+          gh issue create --title "Upstream sync needs attention: $TAG" --body-file "$RUNNER_TEMP/issue-body.md"

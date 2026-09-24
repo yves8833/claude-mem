@@ -14,6 +14,7 @@ const ALLOWED = [
   /thedotmack@gmail/,                           // upstream author
   /username="thedotmack"/,                      // viewer star button for the upstream repo
   /LEGACY_CODEX_PLUGIN_IDS = \['claude-mem@thedotmack'\]/, // disables the upstream Codex install
+  /^scripts\/fork-release\.sh:/,              // the rename it re-applies after an upstream merge
 ];
 
 describe('fork marketplace identity', () => {
@@ -23,7 +24,9 @@ describe('fork marketplace identity', () => {
       'src', 'scripts', 'plugin/hooks', 'plugin/.mcp.json',
       'plugin/scripts/bun-runner.js', 'plugin/scripts/version-check.js',
       '.claude-plugin/marketplace.json',
-    ], { encoding: 'utf-8' });
+    ], { encoding: 'utf-8', cwd: `${import.meta.dir}/..` });
+    // Upstream links always match, so git grep must succeed; anything else means it never ran.
+    expect(result.status).toBe(0);
     const offenders = result.stdout
       .split('\n')
       .filter(Boolean)

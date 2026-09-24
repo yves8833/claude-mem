@@ -34,19 +34,30 @@ kill the worker on every event. `npm run build` handles the plugin manifests and
 
 ## Syncing upstream
 
-History on `main` is only ever merged forward (no rebase, no force-push), so the installed
-marketplace clone can always fast-forward.
+`.github/workflows/fork-upstream-sync.yml` checks upstream daily for a new release tag
+(`vX.Y.Z`). When one exists it merges it on a branch, takes upstream's side of conflicts in
+build output and version fields, runs `scripts/fork-release.sh` (re-applies the rename to the
+hook launchers, picks the next fork version, rebuilds, checks bundle versions), runs the type
+check and the fork-sensitive tests, and opens a PR. Merging that PR is the release: installed
+copies auto-update from `main`. A conflict in source files or a failing check opens an
+"Upstream sync needs attention" issue instead. Run it on demand with
+`gh workflow run fork-upstream-sync.yml` (add `-f dry_run=true` to build and verify only).
+
+Never use GitHub's "Sync fork" button: it merges upstream's version numbers, `thedotmack`
+paths and bundles into `main` unrebuilt, and installed copies would pick that up.
+
+By hand (same steps as the workflow; `main` is only ever merged forward, never rebased or
+force-pushed, so installed marketplace clones can always fast-forward):
 
 ```bash
-git fetch upstream
-git merge upstream/main
-# Conflicts in version fields or plugin/ build output: take upstream's side, the rebuild below replaces them.
-npm version <fork-version> --no-git-tag-version
-npm run build
-# bump the three hand-maintained manifests to <fork-version>
-bun test tests/worker/claude-auth-pool.test.ts tests/fork-marketplace-identity.test.ts && npm run typecheck
-git add -A ':!*.map' && git commit -m "chore: fork release <fork-version>"
+git fetch --tags upstream
+git merge vX.Y.Z            # on conflicts in plugin/ or version fields: git checkout --theirs
+scripts/fork-release.sh vX.Y.Z
+npm run typecheck && bun test tests/fork-marketplace-identity.test.ts tests/worker/claude-auth-pool.test.ts
+git add -A && git commit -m "chore: fork release <printed version>"
 git push origin main
 ```
 
-Then update the plugin in Claude Code and restart the worker.
+Do not open Claude Code sessions inside this repo: the worker resolver also considers the
+session's working directory, and a local build newer than the installed one makes sessions
+kill each other's worker.
